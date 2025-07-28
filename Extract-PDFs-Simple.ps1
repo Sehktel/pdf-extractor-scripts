@@ -26,18 +26,20 @@
     SOFTWARE.
 
 .SYNOPSIS
-    Упрощенная версия для селективного извлечения PDF файлов из ZIP архива
-.PARAMETER ZipFile
-    Путь к ZIP архиву
+    Упрощенная версия для селективного извлечения PDF файлов из архивов (ZIP, RAR, 7Z)
+.PARAMETER SourceArchive
+    Путь к архиву (поддерживаются .zip, .rar, .7z)
 .PARAMETER OutputDir
     Папка назначения для PDF файлов
 .EXAMPLE
-    .\Extract-PDFs-Simple.ps1 -ZipFile "C:\Downloads\MyArchive.zip" -OutputDir "C:\ExtractedPDFs"
+    .\Extract-PDFs-Simple.ps1 -SourceArchive "C:\Downloads\MyArchive.zip" -OutputDir "C:\ExtractedPDFs"
+.EXAMPLE
+    .\Extract-PDFs-Simple.ps1 -SourceArchive "C:\Downloads\Course.rar" -OutputDir "C:\ExtractedPDFs"
 #>
 
 param(
-    [Parameter(Mandatory = $true, HelpMessage = "Путь к ZIP архиву")]
-    [string]$ZipFile,
+    [Parameter(Mandatory = $true, HelpMessage = "Путь к архиву (ZIP, RAR, 7Z)")]
+    [string]$SourceArchive,
     
     [Parameter(Mandatory = $true, HelpMessage = "Папка назначения")]
     [string]$OutputDir
@@ -45,6 +47,58 @@ param(
 
 # Импорт .NET классов для работы с ZIP
 Add-Type -AssemblyName System.IO.Compression
+
+# Функция определения типа архива
+function Get-ArchiveType {
+    param([string]$FilePath)
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".zip" { return "ZIP" }
+        ".rar" { return "RAR" }
+        ".7z"  { return "7Z" }
+        default { throw "Неподдерживаемый тип архива: $extension. Поддерживаются: .zip, .rar, .7z" }
+    }
+}
+
+# Функция поиска утилит
+function Find-ArchiveTools {
+    $tools = @{
+        WinRAR = $null
+        SevenZip = $null
+    }
+    
+    # Поиск WinRAR
+    $winrarPaths = @(
+        "${env:ProgramFiles}\WinRAR\unrar.exe",
+        "${env:ProgramFiles(x86)}\WinRAR\unrar.exe",
+        "${env:ProgramFiles}\WinRAR\WinRAR.exe",
+        "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe"
+    )
+    
+    foreach ($path in $winrarPaths) {
+        if (Test-Path $path) {
+            $tools.WinRAR = $path
+            break
+        }
+    }
+    
+    # Поиск 7-Zip
+    $sevenZipPaths = @(
+        "${env:ProgramFiles}\7-Zip\7z.exe",
+        "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+    )
+    
+    foreach ($path in $sevenZipPaths) {
+        if (Test-Path $path) {
+            $tools.SevenZip = $path
+            break
+        }
+    }
+    
+    return $tools
+}
 
 function Extract-PDFsSelectively {
     param($ArchivePath, $TargetDir)
@@ -55,69 +109,76 @@ function Extract-PDFsSelectively {
             throw "Архив не найден: $ArchivePath"
         }
         
+        # Определение типа архива
+        $archiveType = Get-ArchiveType $ArchivePath
+        Write-Host "🔍 Обрабатываем $archiveType архив..." -ForegroundColor Cyan
+        
         # Создание целевой папки
         if (-not (Test-Path $TargetDir)) {
             New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
         }
         
-        Write-Host "🔍 Анализируем архив..." -ForegroundColor Cyan
+        # Получение списка PDF файлов в зависимости от типа архива
+        $pdfFiles = @()
         
-        # Открытие архива без полной распаковки
-        $fileStream = [System.IO.File]::OpenRead($ArchivePath)
-        $zipArchive = [System.IO.Compression.ZipArchive]::new($fileStream)
+        switch ($archiveType) {
+            "ZIP" {
+                $pdfFiles = Get-ZipPdfFiles $ArchivePath
+            }
+            "RAR" {
+                $pdfFiles = Get-RarPdfFiles $ArchivePath
+            }
+            "7Z" {
+                $pdfFiles = Get-SevenZipPdfFiles $ArchivePath
+            }
+        }
         
-        try {
-            # Поиск PDF файлов в архиве
-            $pdfEntries = $zipArchive.Entries | Where-Object { 
-                $_.Name -match '\.pdf$' -and $_.Length -gt 0 
-            }
-            
-            Write-Host "📄 Найдено PDF файлов: $($pdfEntries.Count)" -ForegroundColor Green
-            
-            if ($pdfEntries.Count -eq 0) {
-                Write-Host "⚠️ PDF файлы в архиве не обнаружены" -ForegroundColor Yellow
-                return
-            }
-            
-            $counter = 0
-            foreach ($entry in $pdfEntries) {
-                $counter++
-                
-                # Формирование пути с сохранением структуры папок
-                $relativePath = $entry.FullName
-                $outputPath = Join-Path $TargetDir $relativePath
-                $outputDirectory = Split-Path $outputPath -Parent
-                
-                # Создание папки если нужно
-                if ($outputDirectory -and -not (Test-Path $outputDirectory)) {
-                    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-                }
-                
-                # Прямое извлечение файла из ZIP
-                $entryStream = $entry.Open()
-                $outputFileStream = [System.IO.File]::Create($outputPath)
-                
-                try {
-                    $entryStream.CopyTo($outputFileStream)
-                    $sizeKB = [math]::Round($entry.Length / 1KB, 1)
-                    Write-Host "✅ [$counter/$($pdfEntries.Count)] $relativePath ($sizeKB КБ)" -ForegroundColor Green
-                }
-                finally {
-                    $entryStream.Dispose()
-                    $outputFileStream.Dispose()
-                }
-            }
-            
-            Write-Host "`n🎉 Готово! PDF файлы извлечены в: $TargetDir" -ForegroundColor Yellow
-            
-            # Статистика
-            $totalSize = ($pdfEntries | Measure-Object -Property Length -Sum).Sum
-            Write-Host "📊 Общий размер: $([math]::Round($totalSize / 1MB, 2)) МБ" -ForegroundColor Cyan
+        Write-Host "📄 Найдено PDF файлов: $($pdfFiles.Count)" -ForegroundColor Green
+        
+        if ($pdfFiles.Count -eq 0) {
+            Write-Host "⚠️ PDF файлы в архиве не обнаружены" -ForegroundColor Yellow
+            return
         }
-        finally {
-            $zipArchive.Dispose()
-            $fileStream.Dispose()
+        
+        # Извлечение PDF файлов
+        $counter = 0
+        foreach ($fileName in $pdfFiles) {
+            $counter++
+            
+            $outputPath = Join-Path $TargetDir $fileName
+            $outputDirectory = Split-Path $outputPath -Parent
+            
+            # Создание папки если нужно
+            if ($outputDirectory -and -not (Test-Path $outputDirectory)) {
+                New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+            }
+            
+            # Извлечение файла в зависимости от типа архива
+            switch ($archiveType) {
+                "ZIP" {
+                    Extract-ZipFile $ArchivePath $fileName $outputPath
+                }
+                "RAR" {
+                    Extract-RarFile $ArchivePath $fileName $outputPath
+                }
+                "7Z" {
+                    Extract-SevenZipFile $ArchivePath $fileName $outputPath
+                }
+            }
+            
+            if (Test-Path $outputPath) {
+                $sizeKB = [math]::Round((Get-Item $outputPath).Length / 1KB, 1)
+                Write-Host "✅ [$counter/$($pdfFiles.Count)] $fileName ($sizeKB КБ)" -ForegroundColor Green
+            }
         }
+        
+        Write-Host "`n🎉 Готово! PDF файлы извлечены в: $TargetDir" -ForegroundColor Yellow
+        
+        # Статистика
+        $extractedFiles = Get-ChildItem $TargetDir -Recurse -Filter "*.pdf"
+        $totalSize = ($extractedFiles | Measure-Object -Property Length -Sum).Sum
+        Write-Host "📊 Извлечено файлов: $($extractedFiles.Count)" -ForegroundColor Cyan
+        Write-Host "📊 Общий размер: $([math]::Round($totalSize / 1MB, 2)) МБ" -ForegroundColor Cyan
     }
     catch {
         Write-Host "❌ Ошибка: $($_.Exception.Message)" -ForegroundColor Red
@@ -125,6 +186,154 @@ function Extract-PDFsSelectively {
     }
 }
 
+# Функции для работы с ZIP архивами
+function Get-ZipPdfFiles {
+    param($ArchivePath)
+    
+    $fileStream = [System.IO.File]::OpenRead($ArchivePath)
+    $zipArchive = [System.IO.Compression.ZipArchive]::new($fileStream)
+    
+    try {
+        $pdfEntries = $zipArchive.Entries | Where-Object { 
+            $_.Name -match '\.pdf$' -and $_.Length -gt 0 
+        }
+        return $pdfEntries | ForEach-Object { $_.FullName }
+    }
+    finally {
+        $zipArchive.Dispose()
+        $fileStream.Dispose()
+    }
+}
+
+function Extract-ZipFile {
+    param($ArchivePath, $FileName, $OutputPath)
+    
+    $fileStream = [System.IO.File]::OpenRead($ArchivePath)
+    $zipArchive = [System.IO.Compression.ZipArchive]::new($fileStream)
+    
+    try {
+        $entry = $zipArchive.Entries | Where-Object { $_.FullName -eq $FileName } | Select-Object -First 1
+        
+        if ($entry) {
+            $entryStream = $entry.Open()
+            $outputFileStream = [System.IO.File]::Create($OutputPath)
+            
+            try {
+                $entryStream.CopyTo($outputFileStream)
+            }
+            finally {
+                $entryStream.Dispose()
+                $outputFileStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $zipArchive.Dispose()
+        $fileStream.Dispose()
+    }
+}
+
+# Функции для работы с RAR архивами
+function Get-RarPdfFiles {
+    param($ArchivePath)
+    
+    $tools = Find-ArchiveTools
+    if (-not $tools.WinRAR) {
+        throw "WinRAR не найден. Установите WinRAR для работы с .rar файлами"
+    }
+    
+    $listResult = & $tools.WinRAR "l" "-cfg-" "$ArchivePath" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка чтения RAR архива"
+    }
+    
+    $pdfFiles = @()
+    $inFileList = $false
+    
+    foreach ($line in $listResult) {
+        if ($line -match "^-{15,}") {
+            $inFileList = -not $inFileList
+            continue
+        }
+        
+        if ($inFileList -and $line -match "\s+(\S.*\.pdf)\s*$") {
+            $pdfFiles += $matches[1].Trim()
+        }
+    }
+    
+    return $pdfFiles
+}
+
+function Extract-RarFile {
+    param($ArchivePath, $FileName, $OutputPath)
+    
+    $tools = Find-ArchiveTools
+    $outputDir = Split-Path $OutputPath -Parent
+    
+    $extractResult = & $tools.WinRAR "e" "-cfg-" "-o+" "$ArchivePath" "$FileName" "$outputDir" 2>&1
+    
+    if ($LASTEXITCODE -eq 0) {
+        $extractedFile = Join-Path $outputDir (Split-Path $FileName -Leaf)
+        if ((Test-Path $extractedFile) -and ($extractedFile -ne $OutputPath)) {
+            Move-Item $extractedFile $OutputPath -Force
+        }
+    }
+}
+
+# Функции для работы с 7-Zip архивами
+function Get-SevenZipPdfFiles {
+    param($ArchivePath)
+    
+    $tools = Find-ArchiveTools
+    if (-not $tools.SevenZip) {
+        throw "7-Zip не найден. Установите 7-Zip для работы с .7z файлами"
+    }
+    
+    $listResult = & $tools.SevenZip "l" "-slt" "$ArchivePath" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка чтения 7-Zip архива"
+    }
+    
+    $pdfFiles = @()
+    $currentFile = ""
+    
+    foreach ($line in $listResult) {
+        if ($line -match "^Path = (.+)$") {
+            $currentFile = $matches[1]
+        }
+        elseif ($line -match "^Folder = -$" -and $currentFile -match "\.pdf$") {
+            $pdfFiles += $currentFile
+            $currentFile = ""
+        }
+    }
+    
+    return $pdfFiles
+}
+
+function Extract-SevenZipFile {
+    param($ArchivePath, $FileName, $OutputPath)
+    
+    $tools = Find-ArchiveTools
+    $tempDir = Join-Path $env:TEMP "7zip_simple_$(Get-Random)"
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    
+    try {
+        $extractResult = & $tools.SevenZip "e" "$ArchivePath" "-o$tempDir" "$FileName" 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            $extractedFile = Join-Path $tempDir (Split-Path $FileName -Leaf)
+            if (Test-Path $extractedFile) {
+                Move-Item $extractedFile $OutputPath -Force
+            }
+        }
+    }
+    finally {
+        if (Test-Path $tempDir) {
+            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Запуск основной функции
 Write-Host "🚀 Начинаем селективное извлечение PDF файлов" -ForegroundColor Green
-Extract-PDFsSelectively -ArchivePath $ZipFile -TargetDir $OutputDir 
+Extract-PDFsSelectively -ArchivePath $SourceArchive -TargetDir $OutputDir 

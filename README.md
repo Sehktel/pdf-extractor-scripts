@@ -1,4 +1,4 @@
-# PDF Extractor Scripts - Архитектурно правильное решение
+# PDF Extractor Scripts
 
 **Автор:** Sehktel  
 **GitHub:** https://github.com/Sehktel/pdf-extractor-scripts
@@ -10,10 +10,12 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 ## 🎯 Основные принципы решения
 
 ### ✅ Что сделано правильно:
-- **Селективное извлечение**: Используем `System.IO.Compression.ZipArchive` для прямого доступа к файлам без полной распаковки
-- **Настоящие CLI параметры**: Все пути передаются как обязательные параметры командной строки
+- **Мультиформатность**: Поддержка ZIP, RAR и 7-Zip архивов с автоматическим определением типа
+- **Селективное извлечение**: Прямой доступ к файлам без полной распаковки
+- **Настоящие CLI параметры**: Все пути передаются как обязательные параметры командной строки  
 - **Эффективность по памяти**: Stream-to-stream копирование без промежуточных буферов
-- **Правильное управление ресурсами**: Using/Dispose паттерн для файловых потоков
+- **Strategy Pattern**: Разные стратегии для разных типов архивов
+- **Автопоиск утилит**: Автоматический поиск WinRAR и 7-Zip в стандартных местах
 
 ### ❌ Что было неправильно в первой версии:
 - Хардкод путей в коде
@@ -26,25 +28,34 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 **Полнофункциональный скрипт с расширенными возможностями**
 
 ```powershell
-# Базовое использование
+# ZIP архивы
 .\Extract-PDFs-Optimized.ps1 -SourceArchive "C:\Downloads\CourseArchive.zip" -DestinationDirectory "C:\ExtractedPDFs"
 
+# RAR архивы (требуется WinRAR)
+.\Extract-PDFs-Optimized.ps1 -SourceArchive "C:\Downloads\Course.rar" -DestinationDirectory "C:\ExtractedPDFs"
+
+# 7-Zip архивы (требуется 7-Zip)
+.\Extract-PDFs-Optimized.ps1 -SourceArchive "C:\Downloads\Materials.7z" -DestinationDirectory "C:\ExtractedPDFs"
+
 # С дополнительными параметрами
-.\Extract-PDFs-Optimized.ps1 -SourceArchive ".\MyArchive.zip" -DestinationDirectory ".\Output" -OverwriteExisting $true -LogLevel "Verbose"
+.\Extract-PDFs-Optimized.ps1 -SourceArchive ".\MyArchive.rar" -DestinationDirectory ".\Output" -OverwriteExisting $true -LogLevel "Verbose"
 
 # Без сохранения структуры папок
-.\Extract-PDFs-Optimized.ps1 -SourceArchive ".\CourseFiles.zip" -DestinationDirectory ".\FlatPDFs" -IncludeSubdirectories $false
+.\Extract-PDFs-Optimized.ps1 -SourceArchive ".\CourseFiles.7z" -DestinationDirectory ".\FlatPDFs" -IncludeSubdirectories $false
 ```
 
 ### 2. `Extract-PDFs-Simple.ps1` - Упрощенная версия  
 **Минималистичная но архитектурно правильная версия**
 
 ```powershell
-# Простое использование
-.\Extract-PDFs-Simple.ps1 -ZipFile "C:\Downloads\CourseArchive.zip" -OutputDir "C:\ExtractedPDFs"
+# ZIP архивы
+.\Extract-PDFs-Simple.ps1 -SourceArchive "C:\Downloads\CourseArchive.zip" -OutputDir "C:\ExtractedPDFs"
 
-# Относительные пути
-.\Extract-PDFs-Simple.ps1 -ZipFile ".\MyArchive.zip" -OutputDir ".\ExtractedPDFs"
+# RAR архивы
+.\Extract-PDFs-Simple.ps1 -SourceArchive "C:\Downloads\Course.rar" -OutputDir "C:\ExtractedPDFs"
+
+# 7-Zip архивы
+.\Extract-PDFs-Simple.ps1 -SourceArchive ".\Materials.7z" -OutputDir ".\ExtractedPDFs"
 ```
 
 ## 🔧 Параметры командной строки
@@ -53,7 +64,7 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 
 | Параметр | Тип | Обязательный | Описание |
 |----------|-----|--------------|----------|
-| `SourceArchive` | string | ✅ | Полный путь к ZIP архиву |
+| `SourceArchive` | string | ✅ | Полный путь к архиву (.zip, .rar, .7z) |
 | `DestinationDirectory` | string | ✅ | Целевая папка для PDF файлов |
 | `IncludeSubdirectories` | bool | ❌ | Сохранять структуру папок (по умолчанию: true) |
 | `OverwriteExisting` | bool | ❌ | Перезаписывать существующие файлы (по умолчанию: false) |
@@ -64,35 +75,57 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 
 | Параметр | Тип | Обязательный | Описание |
 |----------|-----|--------------|----------|
-| `ZipFile` | string | ✅ | Путь к ZIP архиву |
+| `SourceArchive` | string | ✅ | Путь к архиву (.zip, .rar, .7z) |
 | `OutputDir` | string | ✅ | Папка назначения |
 
 ## 🚀 Примеры практического использования
 
 ```powershell
-# Типичный случай использования - полная версия
+# ZIP архивы (встроенная поддержка)
 .\Extract-PDFs-Optimized.ps1 `
     -SourceArchive "C:\Downloads\CourseArchive.zip" `
     -DestinationDirectory ".\Course-PDFs-Only" `
     -LogLevel "Normal"
 
-# Упрощенная версия для быстрого извлечения
-.\Extract-PDFs-Simple.ps1 `
-    -ZipFile "C:\Downloads\CourseArchive.zip" `
-    -OutputDir ".\Course-PDFs-Only"
-
-# Если нужно перезаписать существующие файлы
+# RAR архивы (требуется WinRAR)
 .\Extract-PDFs-Optimized.ps1 `
-    -SourceArchive ".\LearningMaterials.zip" `
+    -SourceArchive "C:\Downloads\LearningMaterials.rar" `
     -DestinationDirectory ".\ExtractedPDFs" `
     -OverwriteExisting $true
 
+# 7-Zip архивы (требуется 7-Zip)
+.\Extract-PDFs-Simple.ps1 `
+    -SourceArchive "C:\Downloads\Documentation.7z" `
+    -OutputDir ".\Course-PDFs-Only"
+
 # Тихий режим без вывода подробностей
 .\Extract-PDFs-Optimized.ps1 `
-    -SourceArchive ".\DocumentArchive.zip" `
+    -SourceArchive ".\DocumentArchive.rar" `
     -DestinationDirectory ".\PDFs" `
     -LogLevel "Quiet"
 ```
+
+## 📋 Системные требования
+
+### Поддерживаемые форматы архивов:
+
+| Формат | Требования | Автопоиск | Примечания |
+|--------|------------|-----------|------------|
+| **ZIP** | Windows (встроенно) | ✅ | Полная поддержка через .NET |
+| **RAR** | WinRAR установлен | ✅ | Поиск unrar.exe и WinRAR.exe |
+| **7Z** | 7-Zip установлен | ✅ | Поиск 7z.exe в стандартных папках |
+
+### Пути поиска утилит:
+
+**WinRAR:**
+- `C:\Program Files\WinRAR\unrar.exe`
+- `C:\Program Files (x86)\WinRAR\unrar.exe`
+- `C:\Program Files\WinRAR\WinRAR.exe`
+- `C:\Program Files (x86)\WinRAR\WinRAR.exe`
+
+**7-Zip:**
+- `C:\Program Files\7-Zip\7z.exe`
+- `C:\Program Files (x86)\7-Zip\7z.exe`
 
 ## 🔬 Технические детали архитектуры
 
@@ -103,18 +136,20 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 3. **Performance**: Обрабатываются только нужные файлы
 4. **Scalability**: Работает с архивами любого размера
 
-### Алгоритм работы:
+### Алгоритм работы (универсальный):
 
 ```
-1. Открытие ZIP архива как Stream (без распаковки)
-2. Анализ содержимого архива (чтение манифеста)
-3. Фильтрация только PDF записей
-4. Для каждого PDF:
-   - Открытие stream входного файла в архиве
-   - Создание stream выходного файла
-   - Прямое копирование stream-to-stream
-   - Закрытие потоков
-5. Освобождение ресурсов архива
+1. Определение типа архива по расширению (.zip, .rar, .7z)
+2. Выбор стратегии обработки:
+   - ZIP: Нативная .NET поддержка (System.IO.Compression)
+   - RAR: Внешняя утилита unrar.exe/WinRAR.exe
+   - 7Z: Внешняя утилита 7z.exe
+3. Получение списка файлов в архиве без распаковки
+4. Фильтрация только PDF записей
+5. Для каждого PDF:
+   - ZIP: Stream-to-stream копирование
+   - RAR/7Z: Селективное извлечение через утилиты
+6. Освобождение ресурсов
 ```
 
 ### Обработка ошибок:
@@ -139,9 +174,11 @@ MIT License - Copyright (c) 2024 Sehktel. См. файл [LICENSE](LICENSE) дл
 - I/O: O(p) где p - суммарный размер PDF файлов
 
 **Design Patterns использованные:**
-- **Strategy Pattern**: Разные уровни логирования
-- **Template Method**: Общий алгоритм с вариациями в деталях
-- **RAII (Resource Acquisition Is Initialization)**: Автоматическое управление ресурсами через using/Dispose
+- **Strategy Pattern**: Разные стратегии для ZIP, RAR и 7Z архивов
+- **Factory Pattern**: Автоматическое создание обработчика по типу архива
+- **Template Method**: Общий алгоритм извлечения с вариациями в деталях
+- **Adapter Pattern**: Унификация интерфейсов для разных утилит
+- **RAII (Resource Acquisition Is Initialization)**: Автоматическое управление ресурсами
 
 **Architectural Principles:**
 - **Single Responsibility**: Каждая функция отвечает за одну задачу

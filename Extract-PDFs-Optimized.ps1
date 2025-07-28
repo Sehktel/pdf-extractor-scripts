@@ -49,13 +49,13 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0, HelpMessage = "Путь к ZIP архиву")]
+    [Parameter(Mandatory = $true, Position = 0, HelpMessage = "Путь к архиву (.zip, .rar, .7z)")]
     [ValidateScript({
         if (-not (Test-Path $_ -PathType Leaf)) {
             throw "Файл архива не найден: $_"
         }
-        if (-not ($_ -match '\.zip$')) {
-            throw "Файл должен иметь расширение .zip: $_"
+        if (-not ($_ -match '\.(zip|rar|7z)$')) {
+            throw "Поддерживаемые форматы: .zip, .rar, .7z. Получен: $_"
         }
         return $true
     })]
@@ -81,6 +81,55 @@ param(
 # Импорт необходимых .NET сборок для работы с ZIP архивами
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# Перечисление поддерживаемых типов архивов
+enum ArchiveType {
+    Zip
+    Rar
+    SevenZip
+}
+
+# Класс для конфигурации утилит архивирования
+class ArchiveTools {
+    static [string]$WinRarPath
+    static [string]$SevenZipPath
+    static [bool]$Initialized = $false
+    
+    static [void] Initialize() {
+        if ([ArchiveTools]::Initialized) { return }
+        
+        # Поиск WinRAR
+        $winrarPaths = @(
+            "${env:ProgramFiles}\WinRAR\unrar.exe",
+            "${env:ProgramFiles(x86)}\WinRAR\unrar.exe",
+            "${env:ProgramFiles}\WinRAR\WinRAR.exe",
+            "${env:ProgramFiles(x86)}\WinRAR\WinRAR.exe"
+        )
+        
+        foreach ($path in $winrarPaths) {
+            if (Test-Path $path) {
+                [ArchiveTools]::WinRarPath = $path
+                break
+            }
+        }
+        
+        # Поиск 7-Zip
+        $sevenZipPaths = @(
+            "${env:ProgramFiles}\7-Zip\7z.exe",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+            "${env:ProgramData}\chocolatey\bin\7z.exe"
+        )
+        
+        foreach ($path in $sevenZipPaths) {
+            if (Test-Path $path) {
+                [ArchiveTools]::SevenZipPath = $path
+                break
+            }
+        }
+        
+        [ArchiveTools]::Initialized = $true
+    }
+}
 
 # Класс для результатов операции
 class ExtractionResult {
@@ -132,6 +181,168 @@ function Write-Log {
     Write-Host "[$timestamp] $prefix $Message" -ForegroundColor $colors[$Level]
 }
 
+# Функция определения типа архива
+function Get-ArchiveType {
+    param([string]$FilePath)
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".zip" { return [ArchiveType]::Zip }
+        ".rar" { return [ArchiveType]::Rar }
+        ".7z"  { return [ArchiveType]::SevenZip }
+        default { throw "Неподдерживаемый тип архива: $extension" }
+    }
+}
+
+# Функция получения списка PDF файлов из RAR архива
+function Get-RarPdfFiles {
+    param(
+        [string]$ArchivePath,
+        [string]$LogLevel
+    )
+    
+    [ArchiveTools]::Initialize()
+    
+    if (-not [ArchiveTools]::WinRarPath) {
+        throw "WinRAR не найден. Установите WinRAR для работы с .rar файлами"
+    }
+    
+    Write-Log "Анализ RAR архива с помощью: $([ArchiveTools]::WinRarPath)" "Verbose" $LogLevel
+    
+    # Получение списка файлов в архиве
+    $listResult = & ([ArchiveTools]::WinRarPath) "l" "-cfg-" "$ArchivePath" 2>&1
+    
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка чтения RAR архива: $($listResult -join "`n")"
+    }
+    
+    # Парсинг вывода и поиск PDF файлов
+    $pdfFiles = @()
+    $inFileList = $false
+    
+    foreach ($line in $listResult) {
+        if ($line -match "^-{15,}") {
+            $inFileList = -not $inFileList
+            continue
+        }
+        
+        if ($inFileList -and $line -match "\s+(\S.*\.pdf)\s*$") {
+            $fileName = $matches[1].Trim()
+            $pdfFiles += $fileName
+        }
+    }
+    
+    return $pdfFiles
+}
+
+# Функция получения списка PDF файлов из 7-Zip архива
+function Get-SevenZipPdfFiles {
+    param(
+        [string]$ArchivePath,
+        [string]$LogLevel
+    )
+    
+    [ArchiveTools]::Initialize()
+    
+    if (-not [ArchiveTools]::SevenZipPath) {
+        throw "7-Zip не найден. Установите 7-Zip для работы с .7z файлами"
+    }
+    
+    Write-Log "Анализ 7-Zip архива с помощью: $([ArchiveTools]::SevenZipPath)" "Verbose" $LogLevel
+    
+    # Получение списка файлов в архиве
+    $listResult = & ([ArchiveTools]::SevenZipPath) "l" "-slt" "$ArchivePath" 2>&1
+    
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка чтения 7-Zip архива: $($listResult -join "`n")"
+    }
+    
+    # Парсинг вывода и поиск PDF файлов
+    $pdfFiles = @()
+    $currentFile = ""
+    
+    foreach ($line in $listResult) {
+        if ($line -match "^Path = (.+)$") {
+            $currentFile = $matches[1]
+        }
+        elseif ($line -match "^Folder = -$" -and $currentFile -match "\.pdf$") {
+            $pdfFiles += $currentFile
+            $currentFile = ""
+        }
+    }
+    
+    return $pdfFiles
+}
+
+# Функция извлечения файла из RAR архива
+function Extract-RarFile {
+    param(
+        [string]$ArchivePath,
+        [string]$FileName,
+        [string]$OutputPath,
+        [string]$LogLevel
+    )
+    
+    $outputDir = Split-Path $OutputPath -Parent
+    if (-not (New-DirectorySafe $outputDir $LogLevel)) {
+        throw "Не удалось создать выходную директорию"
+    }
+    
+    # Извлечение конкретного файла
+    $extractResult = & ([ArchiveTools]::WinRarPath) "e" "-cfg-" "-o+" "$ArchivePath" "$FileName" "$outputDir" 2>&1
+    
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка извлечения файла '$FileName': $($extractResult -join "`n")"
+    }
+    
+    # Перемещение файла в правильное место с сохранением структуры
+    $extractedFile = Join-Path $outputDir (Split-Path $FileName -Leaf)
+    if (Test-Path $extractedFile) {
+        if ($extractedFile -ne $OutputPath) {
+            Move-Item $extractedFile $OutputPath -Force
+        }
+    }
+}
+
+# Функция извлечения файла из 7-Zip архива
+function Extract-SevenZipFile {
+    param(
+        [string]$ArchivePath,
+        [string]$FileName,
+        [string]$OutputPath,
+        [string]$LogLevel
+    )
+    
+    $outputDir = Split-Path $OutputPath -Parent
+    if (-not (New-DirectorySafe $outputDir $LogLevel)) {
+        throw "Не удалось создать выходную директорию"
+    }
+    
+    # Извлечение с сохранением структуры папок
+    $tempDir = Join-Path $env:TEMP "7zip_extract_$(Get-Random)"
+    New-DirectorySafe $tempDir $LogLevel | Out-Null
+    
+    try {
+        $extractResult = & ([ArchiveTools]::SevenZipPath) "e" "$ArchivePath" "-o$tempDir" "$FileName" 2>&1
+        
+        if ($LASTEXITCODE -ne 0) {
+            throw "Ошибка извлечения файла '$FileName': $($extractResult -join "`n")"
+        }
+        
+        # Перемещение файла в правильное место
+        $extractedFile = Join-Path $tempDir (Split-Path $FileName -Leaf)
+        if (Test-Path $extractedFile) {
+            Move-Item $extractedFile $OutputPath -Force
+        }
+    }
+    finally {
+        if (Test-Path $tempDir) {
+            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Функция для безопасного создания директории с обработкой ошибок
 function New-DirectorySafe {
     param(
@@ -152,7 +363,7 @@ function New-DirectorySafe {
     }
 }
 
-# Основная функция селективного извлечения PDF файлов
+# Основная функция селективного извлечения PDF файлов (универсальная)
 function Invoke-SelectivePdfExtraction {
     param(
         [string]$ArchivePath,
@@ -170,105 +381,99 @@ function Invoke-SelectivePdfExtraction {
         Write-Log "Источник: $ArchivePath" "Verbose" $LogLevel
         Write-Log "Назначение: $OutputDirectory" "Verbose" $LogLevel
         
+        # Определение типа архива
+        $archiveType = Get-ArchiveType $ArchivePath
+        Write-Log "Тип архива: $archiveType" "Info" $LogLevel
+        
         # Создание выходной директории
         if (-not (New-DirectorySafe $OutputDirectory $LogLevel)) {
             throw "Не удалось создать выходную директорию"
         }
         
-        # Открытие ZIP архива для чтения (без распаковки)
-        $archiveStream = [System.IO.File]::OpenRead($ArchivePath)
-        $archive = [System.IO.Compression.ZipArchive]::new($archiveStream, [System.IO.Compression.ZipArchiveMode]::Read)
+        $result.TotalArchiveSize = (Get-Item $ArchivePath).Length
         
-        try {
-            # Анализ содержимого архива
-            $allEntries = $archive.Entries
-            $result.TotalEntriesInArchive = $allEntries.Count
-            $result.TotalArchiveSize = (Get-Item $ArchivePath).Length
-            
-            Write-Log "Всего записей в архиве: $($result.TotalEntriesInArchive)" "Info" $LogLevel
-            
-            # Фильтрация PDF файлов
-            $pdfEntries = $allEntries | Where-Object { 
-                $_.Name -match '\.pdf$' -and $_.Length -gt 0 
+        # Получение списка PDF файлов в зависимости от типа архива
+        $pdfFiles = @()
+        switch ($archiveType) {
+            ([ArchiveType]::Zip) {
+                $pdfFiles = Get-ZipPdfFiles $ArchivePath $LogLevel
             }
-            
-            $result.PdfFilesFound = $pdfEntries.Count
-            Write-Log "Обнаружено PDF файлов: $($result.PdfFilesFound)" "Success" $LogLevel
-            
-            if ($result.PdfFilesFound -eq 0) {
-                Write-Log "В архиве не найдено PDF файлов для извлечения" "Warning" $LogLevel
-                return $result
+            ([ArchiveType]::Rar) {
+                $pdfFiles = Get-RarPdfFiles $ArchivePath $LogLevel
             }
-            
-            # Селективное извлечение PDF файлов
-            $extractedCount = 0
-            foreach ($entry in $pdfEntries) {
-                try {
-                    $extractedCount++
-                    
-                    # Определение пути назначения
-                    $relativePath = if ($PreserveStructure) {
-                        $entry.FullName
-                    } else {
-                        $entry.Name
-                    }
-                    
-                    $outputPath = Join-Path $OutputDirectory $relativePath
-                    $outputDir = Split-Path $outputPath -Parent
-                    
-                    # Проверка на перезапись
-                    if ((Test-Path $outputPath) -and -not $Overwrite) {
-                        Write-Log "Пропуск существующего файла: $relativePath" "Warning" $LogLevel
-                        continue
-                    }
-                    
-                    # Создание целевой директории
-                    if (-not (New-DirectorySafe $outputDir $LogLevel)) {
-                        throw "Не удалось создать директорию для файла"
-                    }
-                    
-                    # Прямое извлечение файла из ZIP без временных файлов
-                    $entryStream = $entry.Open()
-                    try {
-                        $outputFileStream = [System.IO.File]::Create($outputPath)
-                        try {
-                            $entryStream.CopyTo($outputFileStream)
-                            $result.ExtractedPdfSize += $entry.Length
-                            $result.ExtractedFiles += $relativePath
-                            
-                            Write-Log "Извлечен: $relativePath ($([math]::Round($entry.Length/1KB, 1)) КБ)" "Success" $LogLevel
-                            
-                            # Обновление прогресса
-                            if ($ShowProgressBar) {
-                                $percentComplete = [math]::Round(($extractedCount / $result.PdfFilesFound) * 100)
-                                Write-Progress -Activity "Извлечение PDF файлов" -Status "Обработано $extractedCount из $($result.PdfFilesFound)" -PercentComplete $percentComplete
-                            }
-                        }
-                        finally {
-                            $outputFileStream.Dispose()
-                        }
-                    }
-                    finally {
-                        $entryStream.Dispose()
-                    }
-                    
-                    $result.PdfFilesExtracted++
-                }
-                catch {
-                    $result.ErrorsOccurred++
-                    $errorMsg = "Ошибка извлечения '$($entry.FullName)': $($_.Exception.Message)"
-                    $result.Errors += $errorMsg
-                    Write-Log $errorMsg "Error" $LogLevel
-                }
-            }
-            
-            if ($ShowProgressBar) {
-                Write-Progress -Activity "Извлечение PDF файлов" -Completed
+            ([ArchiveType]::SevenZip) {
+                $pdfFiles = Get-SevenZipPdfFiles $ArchivePath $LogLevel
             }
         }
-        finally {
-            $archive.Dispose()
-            $archiveStream.Dispose()
+        
+        $result.PdfFilesFound = $pdfFiles.Count
+        Write-Log "Обнаружено PDF файлов: $($result.PdfFilesFound)" "Success" $LogLevel
+        
+        if ($result.PdfFilesFound -eq 0) {
+            Write-Log "В архиве не найдено PDF файлов для извлечения" "Warning" $LogLevel
+            return $result
+        }
+        
+        # Селективное извлечение PDF файлов
+        $extractedCount = 0
+        foreach ($fileName in $pdfFiles) {
+            try {
+                $extractedCount++
+                
+                # Определение пути назначения
+                $relativePath = if ($PreserveStructure) {
+                    $fileName
+                } else {
+                    Split-Path $fileName -Leaf
+                }
+                
+                $outputPath = Join-Path $OutputDirectory $relativePath
+                
+                # Проверка на перезапись
+                if ((Test-Path $outputPath) -and -not $Overwrite) {
+                    Write-Log "Пропуск существующего файла: $relativePath" "Warning" $LogLevel
+                    continue
+                }
+                
+                # Извлечение файла в зависимости от типа архива
+                switch ($archiveType) {
+                    ([ArchiveType]::Zip) {
+                        Extract-ZipFile $ArchivePath $fileName $outputPath $LogLevel
+                    }
+                    ([ArchiveType]::Rar) {
+                        Extract-RarFile $ArchivePath $fileName $outputPath $LogLevel
+                    }
+                    ([ArchiveType]::SevenZip) {
+                        Extract-SevenZipFile $ArchivePath $fileName $outputPath $LogLevel
+                    }
+                }
+                
+                # Подсчет статистики
+                if (Test-Path $outputPath) {
+                    $fileSize = (Get-Item $outputPath).Length
+                    $result.ExtractedPdfSize += $fileSize
+                    $result.ExtractedFiles += $relativePath
+                    $result.PdfFilesExtracted++
+                    
+                    Write-Log "Извлечен: $relativePath ($([math]::Round($fileSize/1KB, 1)) КБ)" "Success" $LogLevel
+                }
+                
+                # Обновление прогресса
+                if ($ShowProgressBar) {
+                    $percentComplete = [math]::Round(($extractedCount / $result.PdfFilesFound) * 100)
+                    Write-Progress -Activity "Извлечение PDF файлов" -Status "Обработано $extractedCount из $($result.PdfFilesFound)" -PercentComplete $percentComplete
+                }
+            }
+            catch {
+                $result.ErrorsOccurred++
+                $errorMsg = "Ошибка извлечения '$fileName': $($_.Exception.Message)"
+                $result.Errors += $errorMsg
+                Write-Log $errorMsg "Error" $LogLevel
+            }
+        }
+        
+        if ($ShowProgressBar) {
+            Write-Progress -Activity "Извлечение PDF файлов" -Completed
         }
     }
     catch {
@@ -280,6 +485,73 @@ function Invoke-SelectivePdfExtraction {
     }
     
     return $result
+}
+
+# Функция получения списка PDF файлов из ZIP архива
+function Get-ZipPdfFiles {
+    param(
+        [string]$ArchivePath,
+        [string]$LogLevel
+    )
+    
+    $archiveStream = [System.IO.File]::OpenRead($ArchivePath)
+    $archive = [System.IO.Compression.ZipArchive]::new($archiveStream, [System.IO.Compression.ZipArchiveMode]::Read)
+    
+    try {
+        $pdfEntries = $archive.Entries | Where-Object { 
+            $_.Name -match '\.pdf$' -and $_.Length -gt 0 
+        }
+        
+        return $pdfEntries | ForEach-Object { $_.FullName }
+    }
+    finally {
+        $archive.Dispose()
+        $archiveStream.Dispose()
+    }
+}
+
+# Функция извлечения файла из ZIP архива
+function Extract-ZipFile {
+    param(
+        [string]$ArchivePath,
+        [string]$FileName,
+        [string]$OutputPath,
+        [string]$LogLevel
+    )
+    
+    $outputDir = Split-Path $OutputPath -Parent
+    if (-not (New-DirectorySafe $outputDir $LogLevel)) {
+        throw "Не удалось создать выходную директорию"
+    }
+    
+    $archiveStream = [System.IO.File]::OpenRead($ArchivePath)
+    $archive = [System.IO.Compression.ZipArchive]::new($archiveStream, [System.IO.Compression.ZipArchiveMode]::Read)
+    
+    try {
+        $entry = $archive.Entries | Where-Object { $_.FullName -eq $FileName } | Select-Object -First 1
+        
+        if (-not $entry) {
+            throw "Файл '$FileName' не найден в архиве"
+        }
+        
+        $entryStream = $entry.Open()
+        try {
+            $outputFileStream = [System.IO.File]::Create($OutputPath)
+            try {
+                $entryStream.CopyTo($outputFileStream)
+            }
+            finally {
+                $outputFileStream.Dispose()
+            }
+        }
+        finally {
+            $entryStream.Dispose()
+        }
+    }
+    finally {
+        $archive.Dispose()
+        $archiveStream.Dispose()
+    }
 }
 
 # Функция вывода финального отчета
